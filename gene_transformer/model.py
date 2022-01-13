@@ -119,7 +119,7 @@ def train(rank, config, world_size):
         losses = []
 
         if rank == 0:
-            pbar = tqdm.tqdm(total=dataset_length)
+            pbar = tqdm(total=dataset_length)
         for i, batch in enumerate(dataloader):
             optimizer.zero_grad()
 

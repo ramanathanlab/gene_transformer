@@ -21,7 +21,7 @@ from tqdm import tqdm
 # import statistics
 # from pytorch_lightning.utilities import rank_zero_only
 #
-# NUM_DATA_WORKERS = 4
+NUM_DATA_WORKERS = 4
 
 import torch
 import numpy as np
@@ -57,7 +57,8 @@ def get_dataloader(config, rank, world_size):
     except FileNotFoundError:
         dataset = TokenDataset(config.train_file, tokenizer_file=config.tokenizer_file, block_size=config.block_size)
         sampler = DistributedSampler(dataset, rank=rank, num_replicas=world_size, shuffle=True)
-        dataloader = DataLoader(dataset, batch_size=config.batch_size, sampler=sampler)
+        dataloader = DataLoader(dataset, batch_size=config.batch_size, sampler=sampler, num_workers=NUM_DATA_WORKERS,
+                          prefetch_factor=4, pin_memory=True, persistent_workers=True)
         with open('/tmp/pickled_train_dataloader.pkl', 'wb') as f:
             b = pickle.dumps([dataloader, len(dataset)])
             f.write(b)

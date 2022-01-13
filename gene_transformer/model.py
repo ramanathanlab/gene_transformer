@@ -53,7 +53,7 @@ def get_dataloader(config, rank, world_size):
     try:
         with open('/tmp/pickled_train_dataloader.pkl', 'rb') as f:
             dataloader, dataset_length = pickle.load(f)
-            return dataloader
+            return dataloader, dataset_length
     except FileNotFoundError:
         dataset = TokenDataset(config.train_file, tokenizer_file=config.tokenizer_file, block_size=config.block_size)
         sampler = DistributedSampler(dataset, rank=rank, num_replicas=world_size, shuffle=True)

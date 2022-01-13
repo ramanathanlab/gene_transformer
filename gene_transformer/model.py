@@ -99,7 +99,7 @@ def train(rank, config, world_size):
     model.train()
 
     # NEW
-    model = DistributedDataParallel(model, device_ids=[rank])
+    model = DistributedDataParallel(model, device_ids=[rank], find_unused_parameters=True)
 
     dataloader = get_dataloader(config, rank, world_size)
 

@@ -15,7 +15,7 @@ from transformers import AdamW
 # import os
 # from utils import generate_dna_to_stop, generate_fasta_file, seqs_to_fasta
 # from blast import BlastRun
-# from tqdm import tqdm
+from tqdm import tqdm
 # from pathlib import Path
 # from Bio import SeqRecord
 # import statistics
@@ -118,7 +118,7 @@ def train(rank, config, world_size):
     for epoch in range(1, NUM_EPOCHS + 1):
         losses = []
 
-        for i, batch in enumerate(dataloader):
+        for i, batch in tqdm(enumerate(dataloader)):
             optimizer.zero_grad()
 
             batch = batch.cuda(rank)

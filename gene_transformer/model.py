@@ -146,7 +146,7 @@ def train(rank, config, world_size):
 
 
 # NEW
-NUM_EPOCHS = 20
+NUM_EPOCHS = 1
 WORLD_SIZE = torch.cuda.device_count()
 
 

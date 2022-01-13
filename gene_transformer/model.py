@@ -118,7 +118,8 @@ def train(rank, config, world_size):
     for epoch in range(1, NUM_EPOCHS + 1):
         losses = []
 
-        for i, batch in tqdm(enumerate(dataloader), total=dataset_length):
+        pbar = tqdm.tqdm(total=dataset_length)
+        for i, batch in enumerate(dataloader):
             optimizer.zero_grad()
 
             batch = batch.cuda(rank)
@@ -132,6 +133,8 @@ def train(rank, config, world_size):
             # if rank == 0:
             #     writer.add_scalar('training loss', curr_loss)
             losses.append(curr_loss)
+            if rank == 0:
+                pbar.update(1)
 
         # print(
         #     f'Finished epoch {epoch}, rank {rank}/{world_size}. '

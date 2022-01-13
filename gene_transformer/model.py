@@ -72,7 +72,7 @@ def get_model(config):
     return model
 
 
-def train(config, rank, world_size):
+def train(rank, config, world_size):
     # NEW
     init_process(rank, world_size)
     print(f"Rank {rank}/{world_size} training process initialized.\n")
@@ -151,7 +151,7 @@ WORLD_SIZE = torch.cuda.device_count()
 
 def main(config):
     mp.spawn(train,
-             args=(config, NUM_EPOCHS, WORLD_SIZE),
+             args=(config, WORLD_SIZE),
              nprocs=WORLD_SIZE,
              join=True)
 

@@ -37,6 +37,7 @@ import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data.distributed import DistributedSampler
 from argparse import ArgumentParser
+from config import ModelSettings
 
 
 # from https://github.com/spellml/deeplab-voc-2012/blob/master/models/2_pytorch_distributed_model.py

@@ -24,11 +24,9 @@
 # NUM_DATA_WORKERS = 4
 
 import torch
-import torchvision
 import numpy as np
 import os
 from torch.utils.data import Dataset, DataLoader
-import PIL
 import torch.nn as nn
 from torch.optim import Adam
 from torch.utils.tensorboard import SummaryWriter

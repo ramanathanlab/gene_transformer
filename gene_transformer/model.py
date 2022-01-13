@@ -1,5 +1,5 @@
-# from transformers import TransfoXLLMHeadModel, TransfoXLConfig
-# from tokenizers import Tokenizer
+from transformers import TransfoXLLMHeadModel, TransfoXLConfig
+from tokenizers import Tokenizer
 # import pytorch_lightning as pl
 # from transformers import PreTrainedTokenizerFast
 # from aitextgen.TokenDataset import TokenDataset
@@ -9,7 +9,7 @@
 # import torch
 # import numpy as np
 # from torch.utils.data import Subset
-# from transformers import AdamW
+from transformers import AdamW
 # from argparse import ArgumentParser
 # from config import ModelSettings
 # import os
@@ -111,7 +111,7 @@ def train(rank, config, world_size):
     # NEW
     # Since we are computing the average of several batches at once (an effective batch size of
     # world_size * batch_size) we scale the learning rate to match.
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3 * world_size)
+    optimizer = AdamW(model.parameters(), lr=5e-5 * world_size)
 
     # writer = SummaryWriter(f'/spell/tensorboards/model_2')
 

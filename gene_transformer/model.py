@@ -72,7 +72,7 @@ def get_model(config):
     return model
 
 
-def train(rank, world_size):
+def train(config, rank, world_size):
     # NEW
     init_process(rank, world_size)
     print(f"Rank {rank}/{world_size} training process initialized.\n")
@@ -88,19 +88,19 @@ def train(rank, world_size):
     # Since the data is cached on disk, we can construct and discard the dataloader and model in
     # the master process only to get the data. The other processes are held back by the barrier.
     if rank == 0:
-        get_dataloader(rank, world_size)
-        get_model()
+        get_dataloader(config, rank, world_size)
+        get_model(config)
     dist.barrier()
     print(f"Rank {rank}/{world_size} training process passed data download barrier.\n")
 
-    model = get_model()
+    model = get_model(config)
     model.cuda(rank)
     model.train()
 
     # NEW
     model = DistributedDataParallel(model, device_ids=[rank])
 
-    dataloader = get_dataloader(rank, world_size)
+    dataloader = get_dataloader(config, rank, world_size)
 
     # since the background class doesn't matter nearly as much as the classes of interest to the
     # overall task a more selective loss would be more appropriate, however this training script
@@ -149,15 +149,19 @@ NUM_EPOCHS = 20
 WORLD_SIZE = torch.cuda.device_count()
 
 
-def main():
+def main(config):
     mp.spawn(train,
-             args=(NUM_EPOCHS, WORLD_SIZE),
+             args=(config, NUM_EPOCHS, WORLD_SIZE),
              nprocs=WORLD_SIZE,
              join=True)
 
 
 if __name__ == "__main__":
-    main()
+    parser = ArgumentParser()
+    parser.add_argument("-c", "--config", required=True)
+    args = parser.parse_args()
+    config = ModelSettings.from_yaml(args.config)
+    main(config)
 
 
 # class DNATransform(pl.LightningModule):

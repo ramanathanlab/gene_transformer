@@ -52,16 +52,16 @@ def init_process(rank, size, backend='gloo'):
 def get_dataloader(config, rank, world_size):
     try:
         with open('/tmp/pickled_train_dataloader.pkl', 'rb') as f:
-            dataloader = pickle.load(f)
+            dataloader, dataset_length = pickle.load(f)
             return dataloader
     except FileNotFoundError:
         dataset = TokenDataset(config.train_file, tokenizer_file=config.tokenizer_file, block_size=config.block_size)
         sampler = DistributedSampler(dataset, rank=rank, num_replicas=world_size, shuffle=True)
         dataloader = DataLoader(dataset, batch_size=config.batch_size, sampler=sampler)
         with open('/tmp/pickled_train_dataloader.pkl', 'wb') as f:
-            b = pickle.dumps(dataloader)
+            b = pickle.dumps([dataloader, len(dataset)])
             f.write(b)
-        return dataloader
+        return dataloader, len(dataset)
 
 
 def get_model(config):
@@ -101,7 +101,7 @@ def train(rank, config, world_size):
     # NEW
     model = DistributedDataParallel(model, device_ids=[rank], find_unused_parameters=True)
 
-    dataloader = get_dataloader(config, rank, world_size)
+    dataloader, dataset_length = get_dataloader(config, rank, world_size)
 
     # since the background class doesn't matter nearly as much as the classes of interest to the
     # overall task a more selective loss would be more appropriate, however this training script
@@ -118,7 +118,7 @@ def train(rank, config, world_size):
     for epoch in range(1, NUM_EPOCHS + 1):
         losses = []
 
-        for i, batch in tqdm(enumerate(dataloader)):
+        for i, batch in tqdm(enumerate(dataloader), total=dataset_length):
             optimizer.zero_grad()
 
             batch = batch.cuda(rank)

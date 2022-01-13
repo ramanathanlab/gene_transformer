@@ -39,7 +39,7 @@ from torch.utils.data.distributed import DistributedSampler
 from argparse import ArgumentParser
 from config import ModelSettings
 from aitextgen.TokenDataset import TokenDataset
-
+import pickle
 
 # from https://github.com/spellml/deeplab-voc-2012/blob/master/models/2_pytorch_distributed_model.py
 def init_process(rank, size, backend='gloo'):

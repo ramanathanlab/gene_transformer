@@ -1,0 +1,27 @@
+wandb_active: false
+wandb_project_name: codon_transformer
+checkpoint_dir: reformer_covid_4node_3mer
+node_local_path: null
+num_nodes: 4
+genome_level: true
+alphabet_type: "codon"
+tokenizer_file: tokenizer_files/codon_wordlevel_100vocab.json
+train_file: data/covid_genome_dataset/sarscov2_filtered/train
+val_file: data/covid_genome_dataset/sarscov2_filtered/val
+test_file: data/covid_genome_dataset/sarscov2_filtered/test
+gap_size: 3
+enable_blast: false
+blast_validation_file: data/covid_genome_dataset/half_subset/val.fasta
+num_blast_seqs_per_gpu: 5
+blast_exe_path: /global/cfs/cdirs/m3957/mzvyagin/conda/envs/conda-env/bin/blastn
+model_name: google/reformer-enwik8
+batch_size: 4
+epochs: 50
+block_size: 10240 #max dna length in covid dataset is 30643, needs to be multiple of 256
+accumulate_grad_batches: 4
+load_from_checkpoint_dir: null
+num_test_seqs_per_gpu: 8
+num_data_workers: 4
+prefetch_factor: 4
+pin_memory: true
+persistent_workers: true

@@ -4,7 +4,7 @@ pydantic
 biopython
 pandas
 aitextgen
-transformers
 deepspeed
 mpire
 natsort
+git+https://github.com/maxzvyagin/transformers

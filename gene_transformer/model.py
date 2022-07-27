@@ -1,48 +1,56 @@
 import os
+import warnings
 from abc import ABC, abstractmethod
 from argparse import ArgumentParser
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 import pytorch_lightning as pl
 import torch
-from deepspeed.ops.adam import DeepSpeedCPUAdam  # type: ignore[import]
-from pytorch_lightning.callbacks import ModelCheckpoint
+from deepspeed.ops.adam import DeepSpeedCPUAdam, FusedAdam
+from deepspeed.runtime.lr_schedules import WarmupLR
+from pytorch_lightning.callbacks import Callback, LearningRateMonitor, ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.plugins import DeepSpeedPlugin
+from pytorch_lightning.profiler import PyTorchProfiler
 from pytorch_lightning.utilities.deepspeed import (
     convert_zero_checkpoint_to_fp32_state_dict,
 )
-from tokenizers import Tokenizer  # type: ignore[import]
+from tokenizers import Tokenizer
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedTokenizerFast
 from transformers.models.gpt2.modeling_gpt2 import GPT2DoubleHeadsModelOutput
 
 from gene_transformer.blast import ParallelBLAST
-from gene_transformer.config import ModelSettings, PathLike
-from gene_transformer.dataset import FASTADataset
+from gene_transformer.config import ModelSettings, PathLike, throughput_config
+from gene_transformer.dataset import FASTADataset, IndividualFastaDataset
 from gene_transformer.utils import (
+    ThroughputMonitor,
     generate_dna_to_stop,
     seqs_to_fasta,
     tokens_to_sequences,
 )
 
+SequenceDataset = Union[FASTADataset, IndividualFastaDataset]
+
 
 class DNATransformer(pl.LightningModule):
+
+    cfg: ModelSettings
+    train_dataset: SequenceDataset
+    val_dataset: SequenceDataset
+    test_dataset: SequenceDataset
+
     def __init__(self, cfg: ModelSettings) -> None:
         super().__init__()
         self.save_hyperparameters(cfg.dict())
         self.cfg = cfg
         self.tokenizer = PreTrainedTokenizerFast(
-            tokenizer_object=Tokenizer.from_file(self.cfg.tokenizer_file)
+            tokenizer_object=Tokenizer.from_file(str(self.cfg.tokenizer_file))
         )
         self.tokenizer.add_special_tokens({"pad_token": "[PAD]"})
-
-        # self.train_dataset = self.get_dataset(self.cfg.train_file)
-        # self.val_dataset = self.get_dataset(self.cfg.val_file)
-        # self.test_dataset = self.get_dataset(self.cfg.test_file)
 
         base_config = AutoConfig.from_pretrained(
             self.cfg.model_name,
@@ -59,27 +67,36 @@ class DNATransformer(pl.LightningModule):
 
         # To validate generated sequences
         # TODO: make sure temp files are outputting to node local
-        self.blast = ParallelBLAST(
-            database_file=self.cfg.blast_validation_file,
-            blast_dir=self.cfg.checkpoint_dir / "blast",
-            blast_exe_path=self.cfg.blast_exe_path,
-            num_workers=min(10, self.cfg.num_blast_seqs_per_gpu),
-            node_local_path=self.cfg.node_local_path,
-        )
+        if self.cfg.enable_blast:
+            self.blast = ParallelBLAST(
+                database_file=self.cfg.blast_validation_file,
+                blast_dir=self.cfg.checkpoint_dir / "blast",
+                blast_exe_path=self.cfg.blast_exe_path,
+                num_workers=min(10, self.cfg.num_blast_seqs_per_gpu),
+                node_local_path=self.cfg.node_local_path,
+            )
 
         # Collect generated sequences at each epoch end
         self.final_sequences: Dict[str, List[str]] = {}
 
-    def get_dataset(self, file: str) -> FASTADataset:
+    def get_dataset(self, data_path: PathLike) -> SequenceDataset:
         """Helper function to generate dataset."""
+        if self.cfg.genome_level:
+            return IndividualFastaDataset(
+                data_path,
+                block_size=self.cfg.block_size,
+                tokenizer=self.tokenizer,
+                kmer_size=self.cfg.kmer_size,
+                small_subset=self.cfg.small_subset,
+            )
         return FASTADataset(
-            file,
-            tokenizer=self.tokenizer,
+            data_path,
             block_size=self.cfg.block_size,
-            alphabet=self.cfg.alphabet_type,
+            tokenizer=self.tokenizer,
+            kmer_size=self.cfg.kmer_size,
         )
 
-    def get_dataloader(self, dataset: FASTADataset, shuffle: bool) -> DataLoader:
+    def get_dataloader(self, dataset: SequenceDataset, shuffle: bool) -> DataLoader:
         """Helper function to generate dataloader."""
         return DataLoader(
             dataset,
@@ -110,10 +127,9 @@ class DNATransformer(pl.LightningModule):
     def training_step(self, batch: torch.Tensor, batch_idx: int) -> torch.FloatTensor:
         outputs = self(batch)
         loss = outputs.loss
-        # self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
-        # self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
-        self.log("train/loss", loss)
-        # wandb.log({"train_loss": loss, 'random_value': 1})
+        self.log(
+            "train/loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True
+        )
         return loss
 
     def validation_step(self, batch: torch.Tensor, batch_idx: int) -> torch.FloatTensor:  # type: ignore[override]
@@ -133,7 +149,21 @@ class DNATransformer(pl.LightningModule):
         return loss
 
     def configure_optimizers(self) -> DeepSpeedCPUAdam:
-        return DeepSpeedCPUAdam(self.parameters(), lr=self.cfg.learning_rate)
+        # optimizer = DeepSpeedCPUAdam(self.parameters(), lr=self.cfg.learning_rate)
+        optimizer = FusedAdam(self.parameters(), lr=self.cfg.learning_rate)
+        if self.cfg.warm_up_lr is not None:
+            scheduler = WarmupLR(
+                optimizer,
+                warmup_min_lr=self.cfg.warm_up_lr.min_lr,
+                warmup_max_lr=self.cfg.learning_rate,
+                warmup_num_steps=self.cfg.warm_up_lr.num_steps,
+            )
+            return [optimizer], [{"scheduler": scheduler, "interval": "step"}]
+
+        return optimizer
+
+    def lr_scheduler_step(self, scheduler, optimizer_idx, metric) -> None:
+        scheduler.step()
 
     def validation_epoch_end(self, val_step_outputs: List[torch.FloatTensor]) -> None:  # type: ignore[override]
         # NOTE: BLAST must be installed locally in order for this to work properly.
@@ -160,7 +190,12 @@ class DNATransformer(pl.LightningModule):
         # Wait until all ranks meet up here
         self.trainer._accelerator_connector.strategy.barrier()  # type: ignore[attr-defined]
         metrics = self.all_gather(metrics)
-        max_score, mean_score = metrics[0].max().cpu(), metrics[1].mean().cpu()
+        try:
+            max_score, mean_score = metrics[0].max().cpu(), metrics[1].mean().cpu()
+        except AttributeError as exc:
+            # getting a weird numpy error when running validation on the protein sequences so catching here
+            print("Attribute error when trying to move tensor to CPU... Error:", exc)
+            max_score, mean_score = metrics[0].max(), metrics[1].mean()
         self.log("val/max_blast_score", max_score, logger=True, prog_bar=True)
         self.log("val/mean_blast_score", mean_score, logger=True, prog_bar=True)
         if self.trainer.is_global_zero:  # type: ignore[attr-defined]
@@ -230,46 +265,73 @@ def train(cfg: ModelSettings) -> None:
         model = DNATransformer(cfg)
 
     # Setup wandb
+    wandb_logger = None
     if cfg.wandb_active:
         print("Using Weights and Biases for logging...")
         wandb_logger = WandbLogger(project=cfg.wandb_project_name)
-    else:
-        wandb_logger = None
 
-    checkpoint_callback = ModelCheckpoint(
-        dirpath=cfg.checkpoint_dir,
-        save_last=True,
-        # monitor="val/loss",
-        # mode="min",
-        # filename="codon-transformer-{step:02d}-{val/loss:.2f}",
-        verbose=True,
+    callbacks: List[Callback] = []
+    callbacks.append(
+        ModelCheckpoint(dirpath=cfg.checkpoint_dir, save_last=True, verbose=True)
     )
+
+    if cfg.wandb_active:
+        callbacks.append(LearningRateMonitor(logging_interval="step"))
+
+    if cfg.compute_throughput:
+        # Remove other callbacks
+        callbacks = [ThroughputMonitor(cfg.batch_size, cfg.num_nodes)]
+
+    profiler = None
+    if cfg.profiling_path:
+        profiler = PyTorchProfiler(
+            dirpath=cfg.profiling_path,
+            profiler_kwargs={
+                "activities": [
+                    torch.profiler.ProfilerActivity.CPU,
+                    torch.profiler.ProfilerActivity.CUDA,
+                ],
+                "schedule": torch.profiler.schedule(wait=0, warmup=1, active=3),
+                "on_trace_ready": torch.profiler.tensorboard_trace_handler("./"),
+            },
+        )
+
     trainer = pl.Trainer(
+        # use all available gpus
         gpus=-1,
         default_root_dir=str(cfg.checkpoint_dir),
         # Use NVMe offloading on other clusters see more here:
         # https://pytorch-lightning.readthedocs.io/en/stable/advanced/advanced_gpu.html#deepspeed-infinity-nvme-offloading
         strategy=DeepSpeedPlugin(
             stage=3,
-            offload_optimizer=True,
-            offload_parameters=True,
-            remote_device="cpu",
-            offload_params_device="cpu",
+            # offload_optimizer=True,
+            # offload_parameters=True,
+            # remote_device="cpu",
+            # offload_params_device="cpu",
             # offload_optimizer_device="nvme",
             # nvme_path="/tmp",
             logging_batch_size_per_gpu=cfg.batch_size,
+            # add the option to load a config from json file with more deepspeed options
+            # note that if supplied all defaults are ignored - model settings defaults this arg to None
+            # config=cfg.deepspeed_cfg_file
         ),
-        callbacks=[checkpoint_callback],
+        callbacks=callbacks,
         # max_steps=cfg.training_steps,
         logger=wandb_logger,
-        # profiler="simple",
+        profiler=profiler,
         accumulate_grad_batches=cfg.accumulate_grad_batches,
         num_sanity_val_steps=0,
-        precision=16,
+        precision=cfg.precision,
         max_epochs=cfg.epochs,
         num_nodes=cfg.num_nodes,
+        check_val_every_n_epoch=cfg.check_val_every_n_epoch
+        # plugins=[SLURMEnvironment(auto_requeue=False)]
     )
     trainer.fit(model)
+    if cfg.compute_throughput:
+        return
+
+    # continue on if a normal training run - testing and inference mode
     trainer.test(model)
 
     if trainer.is_global_zero:
@@ -279,7 +341,9 @@ def train(cfg: ModelSettings) -> None:
         save_path = cfg.checkpoint_dir / "generated"
         save_path.mkdir(exist_ok=True)
         for name, seqs in model.final_sequences.items():
-            seqs_to_fasta(seqs, save_path / f"{name}.fasta")
+            seqs_to_fasta(
+                seqs, save_path / f"{name}.fasta", custom_seq_name=cfg.custom_seq_name
+            )
         print(f"Saved final generated sequences to {save_path}")
 
 
@@ -327,6 +391,7 @@ def generate_embeddings(model: DNATransformer, dataloader: DataLoader) -> np.nda
     return embeddings
 
 
+# TODO: Make separate files for training and inference
 def inference(
     model_load_strategy: ModelLoadStrategy,
     fasta_file: str,
@@ -344,6 +409,32 @@ def inference(
         assert Path(output_path).suffix == ".npy"
         np.save(output_path, embeddings)
     return embeddings
+
+
+def test(cfg: ModelSettings) -> None:
+    """Run test dataset after loading from checkpoint"""
+    model = LoadDeepSpeedStrategy(cfg).get_model()
+    model.cuda()
+
+    trainer = pl.Trainer(
+        gpus=-1,
+        default_root_dir=str(cfg.checkpoint_dir),
+        strategy=DeepSpeedPlugin(
+            stage=3,
+            offload_optimizer=True,
+            offload_parameters=True,
+            remote_device="cpu",
+            offload_params_device="cpu",
+            logging_batch_size_per_gpu=cfg.batch_size,
+        ),
+        accumulate_grad_batches=cfg.accumulate_grad_batches,
+        num_sanity_val_steps=2,
+        precision=cfg.precision,
+        max_epochs=cfg.epochs,
+        num_nodes=cfg.num_nodes,
+    )
+
+    trainer.test(model)
 
 
 if __name__ == "__main__":
@@ -367,9 +458,18 @@ if __name__ == "__main__":
     torch.set_num_threads(config.num_data_workers)  # type: ignore[attr-defined]
     pl.seed_everything(0)
 
+    # check if we're computing throughput - this means a new config with specific settings - default is false
+    if config.compute_throughput:
+        warnings.warn(
+            "You are running in compute throughput mode - running for 6 epochs to compute samples per second. "
+            "No validation or test sets run. No model checkpointing."
+        )
+        # new config definition
+        config = throughput_config(config)
+
     if args.mode == "train":
         train(config)
-    if args.mode == "inference":
+    elif args.mode == "inference" and not config.compute_throughput:
         if not args.inference_fasta:
             raise ValueError("Must provide a fasta file to run inference on.")
 

@@ -1,0 +1,21 @@
+Bootstrap: docker
+From: nvidia/cuda:11.1-cudnn8-devel-ubuntu18.04
+
+%files
+    requirements.txt
+
+%post
+    apt-key adv --keyserver keyserver.ubuntu.com --recv-keys A4B469963BF863CC
+    apt-get -y update
+    apt-get install -y  build-essential  git  wget openmpi-bin libopenmpi-dev 
+
+    wget -q -P /tmp https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+    bash /tmp/Miniconda3-latest-Linux-x86_64.sh -b -p /opt/conda
+
+    export PATH="/opt/conda/bin:$PATH"
+    conda update -qy conda
+
+    pip install -r requirements.txt
+
+%environment
+    PATH="/opt/conda/bin:$PATH"

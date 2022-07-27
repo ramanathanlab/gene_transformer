@@ -18,7 +18,7 @@ class ParallelBLAST:
 
     def __init__(
         self,
-        database_file: str,
+        database_file: Path,
         blast_dir: Path,
         blast_exe_path: Path = Path("blastn"),
         num_workers: int = 1,
@@ -28,7 +28,7 @@ class ParallelBLAST:
 
         Parameters
         ----------
-        database_file : str
+        database_file : Path
             The fasta file containing sequences to blast against.
         blast_dir : Path
             Output directory to write fasta files and blast csv files.

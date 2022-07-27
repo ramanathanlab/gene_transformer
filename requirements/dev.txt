@@ -1,9 +1,11 @@
 # As well as these dev tools:
-mypy
+mypy==0.910 # workaround https://github.com/samuelcolvin/pydantic/issues/3562
 black
 flake8
 pytest
 isort
+pylint
+pydocstyle
 
 # mypy type stubs:
 types-PyYAML

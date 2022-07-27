@@ -1,10 +1,13 @@
 """Model configuration."""
 import json
+import os
+import warnings
 from pathlib import Path
-from typing import Optional, Type, TypeVar, Union
+from typing import Any, Dict, Optional, Type, TypeVar, Union
 
 import yaml
 from pydantic import BaseSettings as _BaseSettings
+from pydantic import root_validator, validator
 
 _T = TypeVar("_T")
 
@@ -42,8 +45,12 @@ class ModelSettings(BaseSettings):
     """Whether to use wandb for logging."""
     wandb_project_name: str = "codon_transformer"
     """Wandb project name to log to."""
-    checkpoint_dir: Path = Path("codon_transformer")
+    checkpoint_dir: Optional[Path] = Path("codon_transformer")
     """Checkpoint directory to backup model weights."""
+    load_from_checkpoint_pt: Optional[Path] = None
+    """Checkpoint pt file to initialze model weights."""
+    load_from_checkpoint_dir: Optional[Path] = None
+    """Deepspeed checkpoint directory to initialze model weights."""
     node_local_path: Optional[Path] = None
     """A node local storage option to write temporary files to."""
     num_nodes: int = 1
@@ -64,10 +71,8 @@ class ModelSettings(BaseSettings):
     """Path to the testing data."""
     kmer_size: int = 3
     """Size of kmer to use for tokenization."""
-    genome_level: bool = False
-    """Whether or not to use the genome-scale dataset class."""
     small_subset: int = 0
-    """Only applies when :obj:`genome_level` is true. Uses the full dataset by default."""
+    """Subset of data files to use during training. Uses the full dataset by default."""
 
     # blast settings
     enable_blast: bool = False
@@ -80,8 +85,8 @@ class ModelSettings(BaseSettings):
     """Path to the BLAST executable, defaults to current conda environment."""
 
     # model settings
-    model_name: str = "gpt2"
-    """Name of the huggingface model to use."""
+    model_config_json: Path
+    """Huggingface json dict to load AutoConfig from."""
     batch_size: int = 8
     """Training micro-batch size."""
     epochs: int = 5
@@ -96,8 +101,6 @@ class ModelSettings(BaseSettings):
     """Training precision."""
     warm_up_lr: Optional[WarmupLRSettings] = None
     """If specified, will use a learning rate warmup scheduler."""
-    load_from_checkpoint_dir: Optional[Path] = None
-    """If specified, will load a model weight checkpoint to resume training from."""
     deepspeed_cfg_file: Optional[Path] = None
     """The deepspeed configuration file (currently unused)."""
     check_val_every_n_epoch: int = 1
@@ -119,13 +122,30 @@ class ModelSettings(BaseSettings):
     persistent_workers: bool = True
     """If True, the data loader will not shutdown the worker processes after a dataset has been consumed once."""
 
+    @validator("node_local_path")
+    def resolve_node_local_path(cls, v: Optional[Path]) -> Optional[Path]:
+        # Check if node local path is stored in environment variable
+        # Example: v = Path("$PSCRATCH") => str(v)[1:] == "PSCRATCH"
+        return None if v is None else Path(os.environ.get(str(v)[1:], v))
+
+    @root_validator
+    def warn_checkpoint_load(cls, values: Dict[str, Any]) -> Dict[str, Any]:
+        load_from_checkpoint_pt = values.get("load_from_checkpoint_pt")
+        load_from_checkpoint_dir = values.get("load_from_checkpoint_dir")
+        if load_from_checkpoint_pt is not None and load_from_checkpoint_dir is not None:
+            warnings.warn(
+                "Both load_from_checkpoint_pt and load_from_checkpoint_dir are "
+                "specified in the configuration. Loading from load_from_checkpoint_pt."
+            )
+        return values
+
 
 def throughput_config(cfg: ModelSettings) -> ModelSettings:
     new_config = cfg.copy()
     new_config.epochs = 6
     new_config.check_val_every_n_epoch = 7
     new_config.num_test_seqs_per_gpu = 0
-    new_config.small_subset = 10000
+    new_config.small_subset = 16000
     new_config.profiling_path = None
     return new_config
 
@@ -135,5 +155,6 @@ if __name__ == "__main__":
         train_file=Path("train.fasta"),
         val_file=Path("val.fasta"),
         test_file=Path("test.fasta"),
+        model_config_json=Path("model.json"),
     )
     settings.dump_yaml("settings_template.yaml")

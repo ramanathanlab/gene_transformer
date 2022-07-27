@@ -1,7 +1,8 @@
 import time
+from abc import ABC, abstractmethod
 from pathlib import Path
 from statistics import mean
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Type
 
 import pytorch_lightning as pl
 import torch
@@ -9,6 +10,9 @@ from Bio import SeqIO  # type: ignore[import]
 from Bio.Seq import Seq  # type: ignore[import]
 from Bio.SeqRecord import SeqRecord  # type: ignore[import]
 from pytorch_lightning.callbacks import Callback
+from pytorch_lightning.utilities.deepspeed import (
+    convert_zero_checkpoint_to_fp32_state_dict,
+)
 from pytorch_lightning.utilities.types import STEP_OUTPUT
 from tqdm import tqdm
 from transformers import PreTrainedTokenizerFast  # , StoppingCriteriaList
@@ -43,14 +47,17 @@ class FoundStopCodonCriteria(StoppingCriteria):  # type: ignore[misc]
         return len(self.stop_set) == batch_size
 
 
-def generate_dna_to_stop(
+def generate_dna(
     model: torch.nn.Module,  # type: ignore[name-defined]
     tokenizer: PreTrainedTokenizerFast,
     max_length: int = 512,
     top_k: int = 50,
     top_p: float = 0.95,
     num_seqs: int = 5,
+    remove_invalid_values: bool = True,
 ) -> torch.Tensor:
+    # remove_invalid_values slows down the calculation
+    # but is more robust for the reformer model.
     # List of generated tokenized sequences.
     # stopping_criteria = StoppingCriteriaList([FoundStopCodonCriteria(tokenizer)])
     return model.generate(  # type: ignore[no-any-return]
@@ -60,12 +67,23 @@ def generate_dna_to_stop(
         top_k=top_k,
         top_p=top_p,
         num_return_sequences=num_seqs,
+        remove_invalid_values=remove_invalid_values,
+        use_cache=True
         #        stopping_criteria=stopping_criteria,
     )
 
 
+def find_stop_codon(codons: List[str]) -> int:
+    # Iterate through until you reach a stop codon
+    # and return the index
+    for i, codon in enumerate(codons):
+        if codon in STOP_CODONS:
+            return i
+    return len(codons) - 1
+
+
 def tokens_to_sequences(
-    tokens: torch.Tensor, tokenizer: PreTrainedTokenizerFast
+    tokens: torch.Tensor, tokenizer: PreTrainedTokenizerFast, to_stop_codon: bool = True
 ) -> List[str]:
     # Decode tokens to codon strings
     seqs = tokenizer.batch_decode(tokens, skip_special_tokens=True)
@@ -73,15 +91,13 @@ def tokens_to_sequences(
     seq_strings = []
     for s in seqs:
         # Break into codons
-        dna = s.split()
-        # Iterate through until you reach a stop codon
-        for i, codon in enumerate(dna):
-            if codon in STOP_CODONS:
-                break
-        # Get the open reading frame
-        to_stop = dna[: i + 1]
-        # Create the string and append to list
-        seq_strings.append("".join(to_stop))
+        codons = s.split()
+        if to_stop_codon:
+            # Get the open reading frame
+            ind = find_stop_codon(codons)
+            codons = codons[: ind + 1]
+        # Create the DNA string and append to list
+        seq_strings.append("".join(codons))
     return seq_strings
 
 
@@ -131,7 +147,7 @@ def non_redundant_generation(
 
     # begin generation loop
     while len(unique_seqs) < num_seqs:
-        tokens = generate_dna_to_stop(
+        tokens = generate_dna(
             model,
             tokenizer,
             max_length=max_length,
@@ -171,6 +187,52 @@ def redundancy_check(
             return False
     # no redundancies found
     return True
+
+
+class ModelLoadStrategy(ABC):
+    @abstractmethod
+    def get_model(self, pl_module: "Type[pl.LightningModule]") -> "pl.LightningModule":
+        """Load and return a module object."""
+
+
+class LoadDeepSpeedStrategy(ModelLoadStrategy):
+    def __init__(self, checkpoint_dir: Path, **kwargs: Any) -> None:
+        self.checkpoint_dir = checkpoint_dir
+        self.kwargs = kwargs
+
+    @staticmethod
+    def load_from_deepspeed(
+        pl_module: "Type[pl.LightningModule]",
+        checkpoint_dir: Path,
+        checkpoint: str = "last.ckpt",
+        model_weights: str = "last.pt",
+        **kwargs: Any,
+    ) -> "pl.LightningModule":
+        """Utility function for deepspeed conversion"""
+        # first convert the weights
+        save_path = str(checkpoint_dir / checkpoint)
+        output_path = str(checkpoint_dir / model_weights)
+        # perform the conversion
+        convert_zero_checkpoint_to_fp32_state_dict(save_path, output_path)
+        # load model
+        model = pl_module.load_from_checkpoint(output_path, strict=False, **kwargs)
+        return model
+
+    def get_model(self, pl_module: "Type[pl.LightningModule]") -> "pl.LightningModule":
+        model = self.load_from_deepspeed(pl_module, self.checkpoint_dir, **self.kwargs)
+        return model
+
+
+class LoadPTCheckpointStrategy(ModelLoadStrategy):
+    def __init__(self, pt_file: str, **kwargs: Any) -> None:
+        self.pt_file = pt_file
+        self.kwargs = kwargs
+
+    def get_model(self, pl_module: "Type[pl.LightningModule]") -> "pl.LightningModule":
+        model = pl_module.load_from_checkpoint(
+            self.pt_file, strict=False, **self.kwargs
+        )
+        return model
 
 
 class ThroughputMonitor(Callback):
@@ -271,3 +333,60 @@ class ThroughputMonitor(Callback):
                     ]
                 ],
             )
+
+
+class SequenceGenerationCallback(Callback):
+    """Custom callback to generate sequences at the end of epoch."""
+
+    def __init__(
+        self,
+        block_size: int,
+        num_test_seqs_per_gpu: int,
+        output_dir: Path,
+        custom_seq_name: str = "SyntheticSeq",
+    ) -> None:
+        super().__init__()
+
+        self.block_size = block_size
+        self.num_test_seqs_per_gpu = num_test_seqs_per_gpu
+        self.output_dir = output_dir
+        self.custom_seq_name = custom_seq_name
+
+        # Collect generated sequences at each epoch end
+        self.final_sequences: Dict[str, List[str]] = {}
+
+    def on_test_epoch_end(
+        self, trainer: "pl.Trainer", pl_module: "pl.LightningModule"
+    ) -> None:
+
+        tokens = generate_dna(
+            pl_module.model,
+            pl_module.tokenizer,
+            num_seqs=self.num_test_seqs_per_gpu,
+            max_length=self.block_size,
+        )
+
+        # Wait until all ranks meet up here
+        trainer._accelerator_connector.strategy.barrier()
+        # sequences after all_gather is shape (world_size, num_test_seqs_per_gpu, block_size)
+        tokens = pl_module.all_gather(tokens)
+
+        if self.trainer.is_global_zero:  # type: ignore[attr-defined]
+            # Concatenate over world size
+            tokens = tokens.view(-1, self.block_size)
+            sequences = tokens_to_sequences(tokens, pl_module.tokenizer)
+            print(f"sequences {len(sequences)}")
+            self.final_sequences[f"globalstep-{pl_module.global_step}"] = sequences
+
+    def on_test_end(
+        self, trainer: "pl.Trainer", pl_module: "pl.LightningModule"
+    ) -> None:
+        if trainer.is_global_zero:
+            self.output_dir.mkdir(exist_ok=True, parents=True)
+            for name, seqs in self.final_sequences.items():
+                seqs_to_fasta(
+                    seqs,
+                    self.output_dir / f"{name}.fasta",
+                    custom_seq_name=self.custom_seq_name,
+                )
+            print(f"Saved final generated sequences to {self.output_dir}")
